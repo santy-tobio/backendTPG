@@ -6,7 +6,7 @@ from typing import List, Dict
 
 def extract_products_from_pdf(pdf_path: str) -> List[Dict]:
     """
-    Extrae productos del PDF de TPG y los convierte a formato para Google Sheets
+    Extrae productos del PDF de TPG con enfoque simple: código + descripción + 4 precios
     """
     print("🚀 Iniciando extracción del PDF...")
     
@@ -30,108 +30,93 @@ def extract_products_from_pdf(pdf_path: str) -> List[Dict]:
     for line in lines:
         line = line.strip()
         
-        # Detectar categorías (líneas en mayúsculas sin números)
+        # Detectar categorías
         if (line.isupper() and 
             3 < len(line) < 30 and 
             not re.search(r'\d', line) and
             line not in ['LISTA DE PRECIOS POR RUBRO', 'TODO PARA LA GASTRONOMIA S.A.',
-                        'EL PRECIO UNITARIO ES POR BULTO CERRADO']):
+                        'EL PRECIO UNITARIO ES POR BULTO CERRADO', 'CODIGO', 'DESCRIPCION']):
             current_category = line
             print(f"📂 Categoría encontrada: {current_category}")
             continue
         
-        # Buscar líneas de productos con el patrón: CODIGO DESCRIPCION PRECIO1 PRECIO2 PRECIO3 PRECIO4
-        # Patrón más flexible para capturar productos
-        product_patterns = [
-            # Patrón principal: codigo descripcion precio1 precio2 precio3 precio4
-            r'^(\d{1,5})\s+(.+?)\s+(\d+[\.,]?\d*)\s+(\d+[\.,]?\d*)\s+(\d+[\.,]?\d*)\s+(\d+[\.,]?\d*)$',
-            # Patrón alternativo para casos especiales
-            r'^(\d{1,5})\s+(.+?)\s+(\d+[\.,]?\d*)\s+(\d+[\.,]?\d*)\s+(\d+[\.,]?\d*)\s+(\d+[\.,]?\d*)'
-        ]
+        # Buscar líneas que empiecen con código (1-5 dígitos)
+        if not re.match(r'^\d{1,5}\s', line):
+            continue
         
-        for pattern in product_patterns:
-            match = re.search(pattern, line)
-            if match:
-                codigo = match.group(1)
-                descripcion_raw = match.group(2)
-                
-                # Limpiar descripción
-                descripcion = re.sub(r'\*\*|\*|ªª|//|\([^)]*\)', '', descripcion_raw)
-                descripcion = re.sub(r'\s+', ' ', descripcion).strip()
-                
-                # Parsear precios (CORREGIDO según columnas del PDF)
-                def parse_price(price_str):
-                    try:
-                        return float(price_str.replace(',', '.').replace(' ', ''))
-                    except:
-                        return 0.0
-                
-                # MAPEO CORRECTO DE COLUMNAS:
-                precio_unit_sin_iva = parse_price(match.group(3))    # Col 1: Precio por UNIDAD SIN IVA
-                precio_bulto_sin_iva = parse_price(match.group(4))   # Col 2: Precio por BULTO SIN IVA  
-                precio_unit_con_iva = parse_price(match.group(5))    # Col 3: Precio por UNIDAD CON IVA
-                precio_caja_con_iva = parse_price(match.group(6))    # Col 4: Precio por CAJA CON IVA
-                
-                # Detectar stock crítico
-                stock_critico = bool(re.search(r'\*|ªª', descripcion_raw))
-                
-                product = {
-                    'codigo': codigo,
-                    'descripcion': descripcion,
-                    'categoria': current_category,
-                    'precio_unitario': precio_unit_con_iva,           # Col 3: Unidad con IVA (principal)
-                    'precio_bulto': precio_caja_con_iva,              # Col 4: Caja con IVA (mayorista)
-                    'precio_unitario_sin_iva': precio_unit_sin_iva,   # Col 1: Unidad sin IVA
-                    'precio_bulto_sin_iva': precio_bulto_sin_iva,     # Col 2: Bulto sin IVA
-                    'imagen_url': f"{codigo}.jpg",
-                    'activo': 'TRUE',
-                    'stock_critico': 'TRUE' if stock_critico else 'FALSE'
-                }
-                
-                products.append(product)
-                break  # Salir del bucle de patrones si encontró coincidencia
+        # Dividir la línea en tokens
+        tokens = line.split()
+        
+        # Necesitamos al menos: código + descripción + 4 precios = 6 tokens mínimo
+        if len(tokens) < 6:
+            continue
+        
+        # El primer token es el código
+        codigo = tokens[0]
+        
+        # Los últimos 4 tokens deberían ser precios (formato: números con hasta 2 decimales)
+        precios = []
+        precio_tokens = []
+        
+        # Buscar los últimos 4 tokens que sean números válidos
+        for i in range(len(tokens) - 1, -1, -1):
+            token = tokens[i]
+            # Verificar si es un número válido (entero o decimal)
+            if re.match(r'^\d{1,6}(?:\.\d{1,2})?$', token):
+                precios.insert(0, float(token))
+                precio_tokens.insert(0, i)
+                if len(precios) == 4:
+                    break
+        
+        # Si no encontramos exactamente 4 precios, saltar esta línea
+        if len(precios) != 4:
+            continue
+        
+        # La descripción está entre el código y los precios
+        descripcion_tokens = tokens[1:precio_tokens[0]]
+        descripcion_raw = ' '.join(descripcion_tokens)
+        
+        # Limpiar descripción
+        descripcion = re.sub(r'\*\*|\*|ªª|//|\([^)]*\)', '', descripcion_raw)
+        descripcion = re.sub(r'\s+', ' ', descripcion).strip()
+        
+        # Debug: primera línea procesada
+        if len(products) == 0:
+            print(f"🔍 Primera línea procesada:")
+            print(f"   Línea: {line}")
+            print(f"   Código: {codigo}")
+            print(f"   Descripción: '{descripcion}'")
+            print(f"   Precios: {precios}")
+        
+        # Mapeo de precios:
+        # precios[0] = Col 1: Unitario SIN IVA
+        # precios[1] = Col 2: Caja SIN IVA  
+        # precios[2] = Col 3: Unitario CON IVA ⭐
+        # precios[3] = Col 4: Caja CON IVA ⭐
+        precio_unitario = precios[2]  # Col 3: Unitario CON IVA
+        precio_bulto = precios[3]     # Col 4: Caja CON IVA
+        
+        # Detectar stock crítico
+        stock_critico = bool(re.search(r'\*|ªª', descripcion_raw))
+        
+        # Crear producto
+        product = {
+            'codigo': codigo,
+            'descripcion': descripcion,
+            'categoria': current_category,
+            'precio_unitario': precio_unitario,
+            'precio_bulto': precio_bulto,
+            'imagen_url': f"{codigo}.jpg",
+            'activo': 'TRUE',
+            'stock_critico': 'TRUE' if stock_critico else 'FALSE'
+        }
+        
+        products.append(product)
     
     print(f"✅ Productos extraídos: {len(products)}")
     return products
 
-def save_products_excel(products: List[Dict], filename: str = "productos_tpg.xlsx"):
-    """Guarda productos en Excel con formato mejorado"""
-    if not products:
-        print("❌ No hay productos para guardar")
-        return
-    
-    # Crear DataFrame
-    df = pd.DataFrame(products)
-    
-    # Reordenar columnas según estructura de Google Sheets
-    column_order = [
-        'codigo', 'descripcion', 'categoria', 
-        'precio_unitario', 'precio_bulto',
-        'precio_unitario_sin_iva', 'precio_bulto_sin_iva',
-        'imagen_url', 'activo', 'stock_critico'
-    ]
-    
-    df = df[column_order]
-    
-    # Guardar en Excel con formato
-    with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-        df.to_excel(writer, sheet_name='Productos', index=False)
-        
-        # Obtener workbook y worksheet para formatear
-        workbook = writer.book
-        worksheet = writer.sheets['Productos']
-        
-        # Ajustar ancho de columnas
-        for idx, col in enumerate(df.columns):
-            max_length = max(
-                df[col].astype(str).map(len).max(),
-                len(col)
-            ) + 2
-            worksheet.column_dimensions[chr(65 + idx)].width = min(max_length, 50)
-    
-    print(f"✅ Archivo Excel guardado: {filename}")
-
-def save_products_csv(products: List[Dict], filename: str = "productos_tpg.csv"):
+def save_products_csv(products: List[Dict], filename: str = "productos_tpg_limpio.csv"):
     """Guarda productos en CSV"""
     if not products:
         print("❌ No hay productos para guardar")
@@ -139,11 +124,10 @@ def save_products_csv(products: List[Dict], filename: str = "productos_tpg.csv")
     
     df = pd.DataFrame(products)
     
-    # Reordenar columnas
+    # Orden de columnas
     column_order = [
         'codigo', 'descripcion', 'categoria', 
         'precio_unitario', 'precio_bulto',
-        'precio_unitario_sin_iva', 'precio_bulto_sin_iva',
         'imagen_url', 'activo', 'stock_critico'
     ]
     
@@ -151,81 +135,94 @@ def save_products_csv(products: List[Dict], filename: str = "productos_tpg.csv")
     df.to_csv(filename, index=False, encoding='utf-8')
     print(f"✅ Archivo CSV guardado: {filename}")
 
+def save_products_excel(products: List[Dict], filename: str = "productos_tpg_limpio.xlsx"):
+    """Guarda productos en Excel"""
+    if not products:
+        print("❌ No hay productos para guardar")
+        return
+    
+    df = pd.DataFrame(products)
+    
+    column_order = [
+        'codigo', 'descripcion', 'categoria', 
+        'precio_unitario', 'precio_bulto',
+        'imagen_url', 'activo', 'stock_critico'
+    ]
+    
+    df = df[column_order]
+    
+    with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='Productos', index=False)
+        
+        workbook = writer.book
+        worksheet = writer.sheets['Productos']
+        
+        # Ajustar columnas
+        for idx, col in enumerate(df.columns):
+            max_length = max(df[col].astype(str).map(len).max(), len(col)) + 2
+            worksheet.column_dimensions[chr(65 + idx)].width = min(max_length, 50)
+    
+    print(f"✅ Archivo Excel guardado: {filename}")
+
 def show_summary(products: List[Dict]):
-    """Muestra resumen de productos extraídos"""
+    """Muestra resumen"""
     if not products:
         return
     
     df = pd.DataFrame(products)
     
-    print(f"\n📊 RESUMEN DE EXTRACCIÓN")
-    print(f"=" * 50)
+    print(f"\n📊 RESUMEN")
+    print(f"=" * 40)
     print(f"Total productos: {len(products)}")
     
-    # Productos por categoría
-    print(f"\n📋 Productos por categoría:")
+    # Por categoría
+    print(f"\n📋 Por categoría:")
     category_counts = df['categoria'].value_counts()
-    for categoria, count in category_counts.head(15).items():
-        print(f"  {categoria:20} {count:3} productos")
+    for categoria, count in category_counts.head(10).items():
+        print(f"  {categoria:15} {count:3} productos")
     
-    if len(category_counts) > 15:
-        print(f"  ... y {len(category_counts) - 15} categorías más")
-    
-    # Productos con stock crítico
+    # Stock crítico
     stock_critico_count = len(df[df['stock_critico'] == 'TRUE'])
-    print(f"\n⚠️  Productos con stock crítico: {stock_critico_count}")
+    print(f"\n⚠️  Stock crítico: {stock_critico_count}")
     
-    # Rangos de precios (CORREGIDO)
-    print(f"\n💰 Rangos de precios (con IVA):")
-    print(f"  Precio unitario: ${df['precio_unitario'].min():.2f} - ${df['precio_unitario'].max():.2f}")
-    print(f"  Precio caja: ${df['precio_bulto'].min():.2f} - ${df['precio_bulto'].max():.2f}")
+    # Precios
+    print(f"\n💰 Precios:")
+    print(f"  Unitario: ${df['precio_unitario'].min():.2f} - ${df['precio_unitario'].max():.2f}")
+    print(f"  Bulto: ${df['precio_bulto'].min():.2f} - ${df['precio_bulto'].max():.2f}")
     
     # Ejemplos
-    print(f"\n📋 Primeros 5 productos (con precios corregidos):")
-    for i, product in enumerate(products[:5]):
-        print(f"  {i+1:2}. [{product['codigo']:4}] {product['descripcion'][:40]}...")
-        print(f"      Categoría: {product['categoria']:15}")
-        print(f"      Unidad c/IVA: ${product['precio_unitario']} | Caja c/IVA: ${product['precio_bulto']}")
+    print(f"\n📋 Ejemplos:")
+    for i, product in enumerate(products[:3]):
+        print(f"  {i+1}. [{product['codigo']}] {product['descripcion']}")
+        print(f"     💲 ${product['precio_unitario']} | ${product['precio_bulto']}")
 
 def main():
     """Función principal"""
-    # Configuración
     PDF_FILE = "listaDePrecios26-4-2025.pdf"
     
-    print("🏪 TPG - Extractor de Productos (PRECIOS CORREGIDOS)")
-    print("=" * 60)
+    print("🏪 TPG - Extractor LIMPIO")
+    print("=" * 40)
     
-    # Verificar archivo PDF
     if not os.path.exists(PDF_FILE):
-        print(f"❌ No se encontró el archivo PDF: {PDF_FILE}")
-        print("💡 Asegúrate de que el archivo esté en el directorio actual")
-        print("💡 Si tiene otro nombre, cambia la variable PDF_FILE en el script")
+        print(f"❌ No se encontró: {PDF_FILE}")
         return
     
-    # Extraer productos
+    # Extraer
     products = extract_products_from_pdf(PDF_FILE)
     
     if not products:
-        print("❌ No se pudieron extraer productos del PDF")
-        print("💡 Verifica que el PDF no esté dañado y tenga el formato esperado")
+        print("❌ No se extrajeron productos")
         return
     
-    # Guardar archivos
-    save_products_excel(products, "productos_tpg_CORREGIDO.xlsx")
-    save_products_csv(products, "productos_tpg_CORREGIDO.csv")
+    # Guardar
+    save_products_csv(products)
+    save_products_excel(products)
     
-    # Mostrar resumen
+    # Resumen
     show_summary(products)
     
-    print(f"\n🎉 ¡Proceso completado con PRECIOS CORREGIDOS!")
-    print(f"📁 Archivos generados:")
-    print(f"   • productos_tpg_CORREGIDO.xlsx (para subir a Google Sheets)")
-    print(f"   • productos_tpg_CORREGIDO.csv (formato CSV)")
-    print(f"\n✅ MAPEO DE PRECIOS CORREGIDO:")
-    print(f"   • precio_unitario → Col 3 PDF (Unidad CON IVA)")
-    print(f"   • precio_bulto → Col 4 PDF (Caja CON IVA)")
-    print(f"   • precio_unitario_sin_iva → Col 1 PDF (Unidad SIN IVA)")
-    print(f"   • precio_bulto_sin_iva → Col 2 PDF (Bulto SIN IVA)")
+    print(f"\n🎉 ¡Listo!")
+    print(f"📁 Archivos: productos_tpg_limpio.csv/xlsx")
 
 if __name__ == "__main__":
     main()
